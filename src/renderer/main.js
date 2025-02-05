@@ -1,5 +1,6 @@
 const { ipcRenderer } = require('electron');
 const { main: debug } = require('../utils/logger');
+const path = require('path');
 
 class SyncApp {
     constructor() {
@@ -174,7 +175,7 @@ class SyncApp {
     }
 
     createTreeItem(item, parentPath = '') {
-        const fullPath = parentPath ? `${parentPath}/${item.name}` : item.path;
+        const fullPath = parentPath ? `${parentPath}${path.sep}${item.name}` : item.path;
         const div = document.createElement('div');
         div.className = 'tree-item';
         div.setAttribute('data-path', fullPath);
