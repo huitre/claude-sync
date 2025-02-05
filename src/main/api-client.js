@@ -66,6 +66,15 @@ class ClaudeAPIClient {
         }
     }
 
+    getOrganizationUUID(account) {
+        const organization = account?.memberships?.find(membership => {
+            return (membership.organization.billing_type === 'stripe_subscription')
+                && (membership.organization.rate_limit_tier === 'default_raven')
+                && membership.organization.raven_type;
+        })?.organization;
+        return organization?.uuid;
+    }
+
     async verifyMagicLink(email, code) {
         try {
             const response = await this.client.post('/auth/verify_magic_link', {
@@ -82,7 +91,7 @@ class ClaudeAPIClient {
                 this.updateSessionKey(sessionKeyCookie.value);
             }
 
-            const organizationUUID = response.data?.account?.memberships?.[0]?.organization?.uuid;
+            const organizationUUID = this.getOrganizationUUID(response.data)
             if (organizationUUID) {
                 this.updateOrganizationUUID(organizationUUID);
             }
