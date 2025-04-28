@@ -174,35 +174,119 @@ class SyncApp {
         }
     }
 
-    createTreeItem(item, parentPath = '') {
+    setItemIgnored(filePath, ignored) {
+        if (ignored) {
+            ipcRenderer.send('delete-remote-file', filePath);
+        }
+        const updateIgnoreStatus = (items) => {
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].path === filePath) {
+                    items[i].ignored = ignored;
+                    if (ignored) {
+                        items[i].ignoreReason = 'manual';
+                    } else {
+                        delete items[i].ignoreReason;
+                    }
+
+                    // Si c'est un dossier, propager l'état aux enfants
+                    if (items[i].isDirectory && items[i].children) {
+                        this.propagateIgnoreStatus(items[i].children, ignored);
+                    }
+                    return true;
+                }
+                if (items[i].isDirectory && items[i].children) {
+                    if (updateIgnoreStatus(items[i].children)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+
+        updateIgnoreStatus(this.syncItems);
+    }
+
+    createTreeItem(item, parentPath = '', parentIgnored = false) {
         const fullPath = parentPath ? `${parentPath}${path.sep}${item.name}` : item.path;
+        const isIgnored = parentIgnored || item.ignored;
+
         const div = document.createElement('div');
-        div.className = 'tree-item';
+        div.className = `tree-item ${isIgnored ? 'ignored' : ''}`;
         div.setAttribute('data-path', fullPath);
 
         const status = this.syncStatuses.get(fullPath) || 'synced';
+
+        if (item.isDirectory && isIgnored) {
+            this.collapsedFolders.add(fullPath);
+        }
+
+        const isCollapsed = this.collapsedFolders.has(fullPath);
+
         const content = `
-            <span class="${item.isDirectory ? 'folder' : 'file'}">
-                ${item.isDirectory ? '<span class="expander">▼</span>' : ''}
-                ${item.name}
-                ${this.getSyncStatusIcon(status)}
-            </span>
-            <span class="remove-btn" data-path="${fullPath}">✕</span>
-        `;
+        <span class="${item.isDirectory ? 'folder' : 'file'} ${isIgnored ? 'ignored' : ''}">
+            ${item.isDirectory ? '<span class="expander">' + (isCollapsed ? '▶' : '▼') + '</span>' : ''}
+            ${item.name}
+            ${isIgnored ? '<span class="ignore-toggle" data-path="' + fullPath + '">+</span>' : ''}
+            ${!isIgnored ? this.getSyncStatusIcon(status) : ''}
+        </span>
+        ${!isIgnored ? '<span class="remove-btn" data-path="' + fullPath + '">✕</span>' : ''}
+    `;
         div.innerHTML = content;
 
         if (item.isDirectory && item.children) {
-            const isCollapsed = this.collapsedFolders.has(item.name);
             div.classList.toggle('collapsed', isCollapsed);
-            div.querySelector('.expander').textContent = isCollapsed ? '▶' : '▼';
 
             const ul = document.createElement('ul');
             ul.style.display = isCollapsed ? 'none' : 'block';
-            item.children.forEach(child => ul.appendChild(this.createTreeItem(child, fullPath)));
+            item.children.forEach(child => ul.appendChild(this.createTreeItem(child, fullPath, isIgnored)));
             div.appendChild(ul);
         }
 
         return div;
+    }
+
+    includeIgnoredFile(filePath) {
+        ipcRenderer.send('upload-file', filePath);
+        const findAndInclude = (items, parentPath = null) => {
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].path === filePath) {
+                    items[i].ignored = false;
+                    delete items[i].ignoreReason;
+
+                    if (items[i].isDirectory && items[i].children) {
+                        this.propagateIgnoreStatus(items[i].children, false);
+                    }
+
+                    if (parentPath) {
+                        // this.checkAndUpdateParentIgnoreStatus(parentPath);
+                    }
+
+                    return true;
+                }
+
+                if (items[i].isDirectory && items[i].children) {
+                    if (findAndInclude(items[i].children, items[i].path)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+
+        findAndInclude(this.syncItems);
+    }
+
+    hasIncludedFiles(children) {
+        if (!children || children.length === 0) return false;
+
+        for (const child of children) {
+            if (!child.ignored) return true;
+            if (child.isDirectory && child.children && this.hasIncludedFiles(child.children)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     updateItemTree() {
@@ -214,13 +298,28 @@ class SyncApp {
         this.addTreeItemListeners();
     }
 
+    propagateIgnoreStatus(items, ignored) {
+        for (let i = 0; i < items.length; i++) {
+            items[i].ignored = ignored;
+            if (ignored) {
+                items[i].ignoreReason = 'parent_ignored';
+            } else {
+                delete items[i].ignoreReason;
+            }
+
+            if (items[i].isDirectory && items[i].children) {
+                this.propagateIgnoreStatus(items[i].children, ignored);
+            }
+        }
+    }
+
     // Add event listeners to tree items
     addTreeItemListeners() {
         this.domElements.itemTree.querySelectorAll('.remove-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const pathToRemove = e.target.getAttribute('data-path');
-                this.removeItemByPath(pathToRemove);
+                const pathToIgnore = e.target.getAttribute('data-path');
+                this.setItemIgnored(pathToIgnore, true); // Au lieu de removeItemByPath
                 this.updateItemTree();
                 this.saveSyncItems();
             });
@@ -230,7 +329,7 @@ class SyncApp {
             expander.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const treeItem = e.target.closest('.tree-item');
-                const folderName = treeItem.querySelector('.folder').textContent.trim();
+                const fullPath = treeItem.getAttribute('data-path');
                 treeItem.classList.toggle('collapsed');
                 e.target.textContent = treeItem.classList.contains('collapsed') ? '▶' : '▼';
                 const childrenContainer = treeItem.querySelector('ul');
@@ -239,10 +338,20 @@ class SyncApp {
                 }
 
                 if (treeItem.classList.contains('collapsed')) {
-                    this.collapsedFolders.add(folderName);
+                    this.collapsedFolders.add(fullPath);
                 } else {
-                    this.collapsedFolders.delete(folderName);
+                    this.collapsedFolders.delete(fullPath);
                 }
+            });
+        });
+
+        this.domElements.itemTree.querySelectorAll('.ignore-toggle').forEach(toggle => {
+            toggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const pathToInclude = e.target.getAttribute('data-path');
+                this.includeIgnoredFile(pathToInclude);
+                this.updateItemTree();
+                this.saveSyncItems();
             });
         });
     }
@@ -303,9 +412,11 @@ class SyncApp {
     // Get all paths from syncItems
     getAllPaths(items) {
         return items.reduce((acc, item) => {
-            acc.push(item.path);
-            if (item.isDirectory && item.children) {
-                acc.push(...this.getAllPaths(item.children));
+            if (!item.ignored) {
+                acc.push(item.path);
+                if (item.isDirectory && item.children) {
+                    acc.push(...this.getAllPaths(item.children));
+                }
             }
             return acc;
         }, []);

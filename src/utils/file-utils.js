@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const { IGNORE_LIST, ALLOWED_EXTENSIONS } = require('./config');
 
-function shouldIgnore(filePath) {
+function checkIgnoreStatus(filePath) {
     const fileName = path.basename(filePath);
     const fileExtension = path.extname(filePath).toLowerCase();
 
@@ -13,20 +13,25 @@ function shouldIgnore(filePath) {
         }
         return fileName === ignoreItem;
     })) {
-        return true;
+        return { ignored: true, reason: 'ignore_list' };
     }
 
     // If it's a directory, don't ignore it based on extension
     if (fs.statSync(filePath).isDirectory()) {
-        return false;
+        return { ignored: false };
     }
 
     // Check if the file extension is in the allowed list
     if (!ALLOWED_EXTENSIONS.includes(fileExtension)) {
-        return true;
+        return { ignored: true, reason: 'extension' };
     }
 
-    return false;
+    return { ignored: false };
+}
+
+// Keep the original shouldIgnore for backward compatibility
+function shouldIgnore(filePath) {
+    return checkIgnoreStatus(filePath).ignored;
 }
 
 function isSubPath(parent, child) {
@@ -63,5 +68,6 @@ function mergeItems(existingItems, newItems) {
 
 module.exports = {
     shouldIgnore,
+    checkIgnoreStatus,
     mergeItems
 };

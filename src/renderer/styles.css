@@ -302,3 +302,20 @@ button:hover {
     font-size: 0.9rem;
     text-align: center;
 }
+
+.tree-item.ignored, .file.ignored, .folder.ignored {
+    color: #999;
+    opacity: 0.6;
+}
+
+.ignore-toggle {
+    margin-left: 5px;
+    cursor: pointer;
+    color: #999;
+    font-weight: bold;
+    transition: color 0.2s ease;
+}
+
+.ignore-toggle:hover {
+    color: var(--success-color);
+}

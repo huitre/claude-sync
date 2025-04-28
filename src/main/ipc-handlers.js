@@ -4,8 +4,8 @@ const fs = require('node:fs/promises');
 const path = require('path');
 const chokidar = require('chokidar');
 const { getStore, getCurrentProjectId, setCurrentProjectId, getSyncItemsForProject, setSyncItemsForProject } = require('./store');
-const { createMainWindow, createProjectSelectionWindow, closeLoginWindow, getMainWindow } = require('./windows');
-const { shouldIgnore, mergeItems } = require('../utils/file-utils');
+const { createMainWindow, closeLoginWindow, getMainWindow } = require('./windows');
+const { shouldIgnore, checkIgnoreStatus, mergeItems } = require('../utils/file-utils');
 const SyncQueue = require('../utils/SyncQueue');
 
 let handlersSetup = false;
@@ -27,6 +27,7 @@ class IpcHandlerManager {
         this.setupStateHandlers();
         this.setupSyncHandlers();
         this.setupProjectHandlers();
+
         ipcMain.handle('logout', () => {
             this.handleLogout();
         });
@@ -196,6 +197,27 @@ class IpcHandlerManager {
             this.startFileWatcher(items);
         });
 
+        ipcMain.on('delete-remote-file', (_, filePath) => {
+            this.handleFileDeletion(this.getStoredSession().organizationUUID, getCurrentProjectId(), filePath);
+        });
+
+        ipcMain.on('upload-file', (_, filePath) => {
+            const { organizationUUID } = this.getStoredSession();
+            const projectUUID = getCurrentProjectId();
+            const rootInfo = this.getSyncRootForFile(filePath);
+
+            if (rootInfo) {
+                this.updateSyncStatus(filePath, 'queued');
+                this.syncQueue.add({
+                    organizationUUID,
+                    projectUUID,
+                    filePath,
+                    syncRoot: rootInfo.syncRoot,
+                    eventType: 'add'
+                });
+            }
+        });
+
         ipcMain.on('stop-sync', () => {
             console.log('Received stop-sync event');
             this.stopFileWatcher();
@@ -268,52 +290,74 @@ class IpcHandlerManager {
     async processSelectedPaths(filePaths) {
         return Promise.all(filePaths.map(async (filePath) => {
             const stats = await fs.stat(filePath);
+            const ignoreStatus = checkIgnoreStatus(filePath);
+
             if (stats.isDirectory()) {
                 return {
                     name: path.basename(filePath),
                     path: filePath,
                     isDirectory: true,
+                    ignored: ignoreStatus.ignored,
+                    ignoreReason: ignoreStatus.reason,
                     children: await this.getDirectoryContents(filePath)
                 };
             } else {
-                if (!shouldIgnore(filePath)) {
-                    return {
-                        name: path.basename(filePath),
-                        path: filePath,
-                        isDirectory: false
-                    };
-                }
-                return null;
+                return {
+                    name: path.basename(filePath),
+                    path: filePath,
+                    isDirectory: false,
+                    ignored: ignoreStatus.ignored,
+                    ignoreReason: ignoreStatus.reason
+                };
             }
-        })).then(items => items.filter(item => item !== null));
+        })).then(items => items);
     }
 
     async getDirectoryContents(dir) {
         const items = await fs.readdir(dir, { withFileTypes: true });
         return Promise.all(items.map(async (item) => {
             const fullPath = path.join(dir, item.name);
-            if (shouldIgnore(fullPath)) {
-                return null;
-            }
+            const ignoreStatus = checkIgnoreStatus(fullPath);
+
             if (item.isDirectory()) {
                 const children = await this.getDirectoryContents(fullPath);
-                if (children.length === 0) {
-                    return null; // Ignore empty directories
-                }
                 return {
                     name: item.name,
                     path: fullPath,
                     isDirectory: true,
+                    ignored: ignoreStatus.ignored,
+                    ignoreReason: ignoreStatus.reason,
                     children: children
                 };
             } else {
                 return {
                     name: item.name,
                     path: fullPath,
-                    isDirectory: false
+                    isDirectory: false,
+                    ignored: ignoreStatus.ignored,
+                    ignoreReason: ignoreStatus.reason
                 };
             }
-        })).then(items => items.filter(item => item !== null));
+        }));
+        console.log(`Directory ${dir} contains ${results.length} items`);
+    }
+
+    getNonIgnoredPaths(items) {
+        const paths = [];
+
+        const extractPaths = (items) => {
+            for (const item of items) {
+                if (!item.ignored) {
+                    paths.push(item.path);
+                }
+                if (item.isDirectory && item.children) {
+                    extractPaths(item.children);
+                }
+            }
+        };
+
+        extractPaths(items);
+        return paths;
     }
 
     startFileWatcher(items) {
@@ -322,7 +366,24 @@ class IpcHandlerManager {
             this.watcher.close();
         }
 
-        this.watcher = chokidar.watch(items, {
+        // Vérifier que le tableau d'items est valide et non vide
+        if (!items || !Array.isArray(items) || items.length === 0) {
+            console.error('No valid items to watch');
+            getMainWindow().webContents.send('sync-error', 'No valid items to watch');
+            return;
+        }
+
+        const validPaths = items.filter(path => typeof path === 'string' && path.trim() !== '');
+
+        if (validPaths.length === 0) {
+            console.error('No valid paths to watch');
+            getMainWindow().webContents.send('sync-error', 'No valid paths to watch');
+            return;
+        }
+
+        console.log('Watching paths:', validPaths);
+
+        this.watcher = chokidar.watch(validPaths, {
             ignored: shouldIgnore,
             persistent: true,
             ignoreInitial: false,
@@ -438,7 +499,7 @@ class IpcHandlerManager {
 
     isFileInItems(filePath, items) {
         for (const item of items) {
-            if (!item.isDirectory && item.path === filePath) {
+            if (!item.isDirectory && item.path === filePath && !item.ignored) {
                 return true;
             }
             if (item.isDirectory && item.children) {
